@@ -1,7 +1,8 @@
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+import html
+import re
 
 app = FastAPI()
 
@@ -29,28 +30,33 @@ def obfuscate_html(
         "user-agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36",
     }
 
-    resp = requests.post("https://www.phpkobo.com/html-obfuscator", data=form_body, headers=headers)
-    resp.raise_for_status()
+    try:
+        resp = requests.post("https://www.phpkobo.com/html-obfuscator", data=form_body, headers=headers)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise ValueError(f"Failed to fetch response from phpkobo.com: {str(e)}")
 
     soup = BeautifulSoup(resp.text, "html.parser")
     textarea = soup.select_one("textarea.codebox-input[name=ocode]")
 
     if textarea:
-        text = textarea.get_text()
-        if text and text.strip() != "":
-            return text
-        if textarea.has_attr("value") and textarea["value"].strip() != "":
-            return textarea["value"]
+        text = textarea.get_text().strip()
+        if not text:
+            # Fallback to value attribute
+            text = textarea.get("value", "").strip()
 
-    raise ValueError("Failed to take the contents of the Ocode from the HTML response.")
+        if text:
+            # Decode Unicode escape sequences (e.g., \u003C to <)
+            text = html.unescape(text)
+            # Remove unwanted comments (e.g., <!-- Obfuscated at ... -->)
+            text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+            # Remove any stray <script> tags if removeScript is True
+            if removeScript:
+                text = re.sub(r"<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>", "", text, flags=re.DOTALL)
+            return text.strip()
 
-# Define a Pydantic model for input validation
-class CodeInput(BaseModel):
-    code: str
-    removeScript: bool = True
-    removeComment: bool = True
+    raise ValueError("Failed to extract obfuscated HTML from the response.")
 
-# FastAPI endpoint to handle ?code= query parameter
 @app.get("/obfuscate")
 async def obfuscate(code: str, removeScript: bool = True, removeComment: bool = True):
     try:
